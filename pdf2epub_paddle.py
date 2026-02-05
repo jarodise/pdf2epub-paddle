@@ -237,7 +237,7 @@ def create_epub(title: str, results: List[Dict], output_file: str, image_dir: st
     # Regex to identify "Major" headers (Chapters/Parts) to split on
     # Matches: "Chapter 1", "Part I", "First Chapter", "第1章", "第一篇", etc.
     major_header_pattern = re.compile(
-        r"^(#{1,2})\s+(?:Chapter|Part|第[零一二三四五六七八九十百千0-9]+[篇章]).*"
+        r"^(#{1,2})\s+(?:Chapter|Part|Lecture|Preface|Intro|Appendix|序|前言|导论|目录|第[零一二三四五六七八九十百千0-9]+[篇章讲]).*"
     )
 
     # Regex for ANY header to format as H1/H2 in HTML but not necessarily split
