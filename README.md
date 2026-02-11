@@ -7,7 +7,7 @@ This tool converts scanned PDF books into clean, readable EPUB ebooks using the 
 ## Features
 
 - **High-Quality Layout Analysis**: Uses PaddleOCR to intelligently detect paragraphs, headers, images, and tables.
-- **Smart Chapter Splitting**: Automatically splits books into chapters based on headers (e.g., "Chapter 1", "Part I").
+- **Smart Chapter Splitting**: Automatically detects chapter headings from OCR output. An interactive TOC review lets you confirm, remove, or adjust detected chapters before generating the EPUB.
 - **Cover Image**: Automatically extracts the first page of the PDF as the EPUB cover.
 - **Metadata Support**: Interactively prompts for book title and author based on OCR'd first-page text, or accepts them via CLI arguments.
 - **Image Embedding**: Preserves images from the original PDF.
@@ -78,6 +78,18 @@ This project uses [uv](https://github.com/astral-sh/uv) for fast, reliable depen
 
     ```bash
     uv run pdf2epub_paddle.py --output /path/to/output.epub /path/to/your/book.pdf
+    ```
+
+    To skip the interactive TOC review and use automatic chapter detection:
+
+    ```bash
+    uv run pdf2epub_paddle.py --auto-toc /path/to/your/book.pdf
+    ```
+
+    To produce a single-chapter EPUB with no chapter splitting:
+
+    ```bash
+    uv run pdf2epub_paddle.py --no-toc /path/to/your/book.pdf
     ```
 
 ### Alternative: Standard Pip

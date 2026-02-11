@@ -3,6 +3,7 @@ import sys
 import argparse
 import base64
 import json
+import re
 import tempfile
 
 
@@ -192,6 +193,99 @@ def extract_metadata_interactive(results: List[Dict], default_title: str) -> Dic
     return {"title": title, "author": author if author else None}
 
 
+def extract_candidate_headings(results: List[Dict]) -> List[Dict]:
+    """Scans API results and extracts candidate chapter headings with page numbers."""
+    candidates = []
+    any_header_pattern = re.compile(r"^(#{1,2})\s+(.+)$")
+    global_page = 0
+
+    for result in results:
+        if not result or "result" not in result:
+            continue
+        for page_res in result["result"].get("layoutParsingResults", []):
+            global_page += 1
+            page_md = page_res["markdown"]["text"]
+            for line in page_md.split("\n"):
+                if line.strip().isdigit():
+                    continue
+                match = any_header_pattern.match(line)
+                if match:
+                    candidates.append({
+                        "title": match.group(2).strip(),
+                        "page": global_page,
+                        "level": len(match.group(1)),
+                        "md_line": line,
+                    })
+    return candidates
+
+
+def review_toc_interactive(candidates: List[Dict]) -> List[Dict]:
+    """Interactive prompt for reviewing and editing the auto-detected TOC."""
+    if not candidates:
+        print("\n[!] No chapter headings detected. The book will be a single chapter.")
+        return []
+
+    def _print_heading_list(headings):
+        print(f"  {'#':>3}  | {'Pg':>4} | Heading")
+        print(f"  {'---':>3}--+------+{'-' * 40}")
+        for i, h in enumerate(headings):
+            indent = "  " if h["level"] == 1 else "    "
+            print(f"  {i+1:>3}  | {h['page']:>4} | {indent}{h['title']}")
+
+    print("\n--- Detected Chapter Headings ---")
+    _print_heading_list(candidates)
+    print()
+    print("Options:")
+    print("  [Enter]  Accept all headings as chapter split points")
+    print("  1,3,5    Remove headings by number (comma-separated)")
+    print("  none     No chapters (entire book as single chapter)")
+    print()
+
+    while True:
+        choice = input("Your choice: ").strip().lower()
+
+        if choice == "":
+            return list(candidates)
+        elif choice == "none":
+            return []
+        else:
+            try:
+                to_remove = set()
+                valid = True
+                for part in choice.split(","):
+                    num = int(part.strip())
+                    if 1 <= num <= len(candidates):
+                        to_remove.add(num)
+                    else:
+                        print(f"  [!] Invalid number: {num} (must be 1-{len(candidates)})")
+                        valid = False
+                        break
+
+                if not valid:
+                    continue
+
+                confirmed = [h for i, h in enumerate(candidates) if (i + 1) not in to_remove]
+
+                if confirmed:
+                    print(f"\nUpdated TOC ({len(confirmed)} chapters):")
+                    _print_heading_list(confirmed)
+                else:
+                    print("\n  All headings removed. Book will be a single chapter.")
+
+                confirm = input("\nConfirm? [Y/n]: ").strip().lower()
+                if confirm in ("", "y", "yes"):
+                    return confirmed
+                else:
+                    print("\n--- Detected Chapter Headings ---")
+                    _print_heading_list(candidates)
+                    print()
+                    continue
+
+            except ValueError:
+                print("  [!] Invalid input. Enter comma-separated numbers, 'none', or press Enter.")
+                continue
+
+
 def download_image(url: str, save_path: str):
     """Downloads an image from a URL to a local path."""
     try:
@@ -207,7 +301,8 @@ def download_image(url: str, save_path: str):
 
 
 def create_epub(title: str, results: List[Dict], output_file: str, image_dir: str,
-                cover_image_path: str = None, author: str = None):
+                cover_image_path: str = None, author: str = None,
+                confirmed_headings: List[Dict] = None):
     """
     Creates an EPUB file from the aggregated API results.
     """
@@ -314,7 +409,6 @@ def create_epub(title: str, results: List[Dict], output_file: str, image_dir: st
     # Split markdown into chapters based on headers (# Header)
     # If no headers found, put everything in one chapter.
 
-    import re
     # Split by H1 or H2, BUT only if it looks like a real Chapter/Part title
     # Regex for headers: ^#+ \s* (Title)
 
@@ -323,8 +417,7 @@ def create_epub(title: str, results: List[Dict], output_file: str, image_dir: st
     current_chapter_content = []
     chapter_count = 0
 
-    # Regex to identify "Major" headers (Chapters/Parts) to split on
-    # Matches: "Chapter 1", "Part I", "First Chapter", "第1章", "第一篇", etc.
+    # Regex to identify "Major" headers (Chapters/Parts) to split on (legacy fallback)
     major_header_pattern = re.compile(
         r"^(#{1,2})\s+(?:Chapter|Part|Lecture|Preface|Intro|Appendix|Prologue|Epilogue|Conclusion|Book|Acknowledgements|Contents|Abstract|序|前言|导论|目录|第[零一二三四五六七八九十百千0-9]+[篇章讲]).*"
     )
@@ -332,17 +425,29 @@ def create_epub(title: str, results: List[Dict], output_file: str, image_dir: st
     # Regex for ANY header to format as H1/H2 in HTML but not necessarily split
     any_header_pattern = re.compile(r"^(#{1,2})\s+(.+)$")
 
+    # Build set of confirmed heading titles for O(1) lookup
+    if confirmed_headings is not None:
+        confirmed_titles = {h["title"] for h in confirmed_headings}
+    else:
+        confirmed_titles = None  # use legacy regex fallback
+
     for line in md_lines:
+        # Check if line is a header (before LaTeX cleanup, to match extracted candidates)
+        match = any_header_pattern.match(line)
+        is_split_point = False
+        if match:
+            heading_text = match.group(2).strip()
+            # Determine if this heading is a chapter split point
+            if confirmed_titles is not None:
+                is_split_point = heading_text in confirmed_titles
+            else:
+                is_split_point = bool(major_header_pattern.match(line))
+
         # Clean up LaTeX-style footnotes ($ ^{①} $ -> <sup>①</sup>)
-        # Matches $ ^{...} $ and replaces with <sup>...</sup>
         line = re.sub(r"\$\s*\^\{(.+?)\}\s*\$", r"", line)
 
-        # Check if line is a header
-        match = any_header_pattern.match(line)
         if match:
-            # Check if it is a MAJOR header that warrants a new file (Chapter)
-            major_match = major_header_pattern.match(line)
-            if major_match:
+            if is_split_point:
                 # If we have content for the previous chapter, save it
                 if current_chapter_content:
                     # Determine filename
@@ -446,11 +551,19 @@ def main():
     )
     parser.add_argument("--title", help="Book title (skips interactive prompt)")
     parser.add_argument("--author", help="Author name (skips interactive prompt)")
+    parser.add_argument("--auto-toc", action="store_true",
+                        help="Skip interactive TOC review; use auto-detected headings")
+    parser.add_argument("--no-toc", action="store_true",
+                        help="Skip heading detection; produce single-chapter EPUB")
     args = parser.parse_args()
 
     input_path = args.input_pdf
     if not os.path.exists(input_path):
         print(f"Error: File {input_path} not found.")
+        return
+
+    if args.auto_toc and args.no_toc:
+        print("[!] Error: --auto-toc and --no-toc are mutually exclusive.")
         return
 
     if not API_TOKEN:
@@ -542,10 +655,21 @@ def main():
         else:
             metadata = extract_metadata_interactive(results, default_title)
 
+        # Step 2.75: TOC Review
+        if args.no_toc:
+            confirmed_headings = []
+        elif args.auto_toc:
+            confirmed_headings = None
+        else:
+            print("[-] Step 2.75: Detecting chapter headings...")
+            candidates = extract_candidate_headings(results)
+            confirmed_headings = review_toc_interactive(candidates)
+
         # Step 3: Generation
         print("[-] Step 3: Generating EPUB...")
         create_epub(metadata["title"], results, args.output, image_dir,
-                    cover_image_path=cover_path, author=metadata["author"])
+                    cover_image_path=cover_path, author=metadata["author"],
+                    confirmed_headings=confirmed_headings)
 
     finally:
         # Cleanup temp chunks
